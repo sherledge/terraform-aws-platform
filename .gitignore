@@ -1,0 +1,17 @@
+# Terraform temporary files & state
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+.terraform.lock.hcl
+
+# Python / Virtual Environment
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.env
+
+# OS-specific
+.DS_Store
+Thumbs.db
