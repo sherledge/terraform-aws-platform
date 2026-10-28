@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 
 
       # Stage 1: Secret Scanning with Gitleaks
       - name: Gitleaks Secret Scan
