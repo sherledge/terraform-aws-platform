@@ -39,7 +39,7 @@ jobs:
         run: |
           cd app
           pip install -r requirements.txt
-          python -m pytest tests/
+          python -m pytest app/tests/ --rootdir=.
 
       # Stage 4: Dependency Vulnerability Scan (SCA)
       - name: Run pip-audit for Vulnerable Dependencies
