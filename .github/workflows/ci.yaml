@@ -1,0 +1,101 @@
+name: "Secure DevSecOps CI Pipeline"
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: write
+  packages: write
+  security-events: write
+
+jobs:
+  security-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Stage 1: Secret Scanning with Gitleaks
+      - name: Gitleaks Secret Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Stage 2: Dockerfile Linting with Hadolint
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+
+      # Stage 3: Python Unit Tests
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install Dependencies & Run Tests
+        run: |
+          cd app
+          pip install -r requirements.txt
+          pytest
+
+      # Stage 4: Dependency Vulnerability Scan (SCA)
+      - name: Run pip-audit for Vulnerable Dependencies
+        run: |
+          pip install pip-audit
+          pip-audit -r app/requirements.txt
+
+      # Stage 5 & 6: Build Container Image Tagged with Git Commit SHA
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Metadata (Tags & Labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/app
+          tags: |
+            type=sha,format=short
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./app
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+      # Stage 7: Container Image Vulnerability Scan (Trivy)
+      - name: Run Trivy vulnerability scanner on built image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ghcr.io/${{ github.repository }}/app:sha-${{ github.sha }}
+          format: 'table'
+          exit-code: '1'
+          severity: 'HIGH,CRITICAL'
+
+      # Stage 11: Automated GitOps Config Update
+      - name: Update Image Tag in GitOps Config Repo
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_PAT: ${{ secrets.GITOPS_CONFIG_PAT }} # Personal Access Token with repo write permissions
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "bot@github.com"
+          
+          # Clone the separate GitOps config repository
+          git clone https://x-access-token:${GH_PAT}@github.com/sherledge/gitops-config.git
+          cd gitops-config/overlays/dev
+          
+          # Update image tag using Kustomize
+          kustomize edit set image ghcr.io/${{ github.repository }}/app=ghcr.io/${{ github.repository }}/app:sha-${{ github.sha }}
+          
+          git add kustomization.yaml
+          git commit -m "chore(dev): update image tag to sha-${{ github.sha }}"
+          git push origin main
