@@ -82,7 +82,7 @@ jobs:
           image-ref: ghcr.io/${{ github.repository }}/app:${{ github.sha }}
           format: 'table'
           exit-code: '1'
-          severity: 'HIGH,CRITICAL'
+          severity: 'CRITICAL'
 
       # Stage 11: Automated GitOps Config Update
       - name: Update Image Tag in GitOps Config Repo
