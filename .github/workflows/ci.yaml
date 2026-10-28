@@ -67,8 +67,10 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: ./app
+          file: ./app/Dockerfile
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: |
+            ghcr.io/${{ github.repository }}/app:${{ github.sha }}
           labels: ${{ steps.meta.outputs.labels }}
 
       # Stage 7: Container Image Vulnerability Scan (Trivy)
