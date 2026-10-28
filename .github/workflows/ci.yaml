@@ -79,7 +79,7 @@ jobs:
       - name: Run Trivy vulnerability scanner on built image
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: ghcr.io/${{ github.repository }}/app:sha-${{ github.sha }}
+          image-ref: ghcr.io/${{ github.repository }}/app:${{ github.sha }}
           format: 'table'
           exit-code: '1'
           severity: 'HIGH,CRITICAL'
