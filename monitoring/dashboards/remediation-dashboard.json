@@ -1,0 +1,99 @@
+{
+  "title": "Auto-Remediation Service",
+  "uid": "remediation-service",
+  "schemaVersion": 39,
+  "version": 2,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "tags": ["remediation"],
+  "templating": {
+    "list": [
+      { "name": "datasource", "label": "Data source", "type": "datasource", "query": "prometheus", "current": {} }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1, "type": "stat", "title": "Restarts triggered",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "sum(remediation_restarts_total) or vector(0)" }]
+    },
+    {
+      "id": 2, "type": "stat", "title": "Alerts received",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "sum(remediation_alerts_received_total) or vector(0)" }]
+    },
+    {
+      "id": 3, "type": "stat", "title": "Kubernetes API errors",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "sum(remediation_api_errors_total) or vector(0)" }]
+    },
+    {
+      "id": 4, "type": "stat", "title": "Firing alerts (excl. Watchdog and Minikube control plane)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "targets": [{
+        "refId": "A",
+        "expr": "count(ALERTS{alertstate=\"firing\", alertname!=\"Watchdog\", job!~\"kube-etcd|kube-scheduler|kube-controller-manager\"}) or vector(0)"
+      }]
+    },
+    {
+      "id": 5, "type": "timeseries", "title": "Restarts over time, per deployment",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0, "softMax": 3, "decimals": 0,
+          "custom": { "drawStyle": "bars", "fillOpacity": 60, "lineWidth": 1 }
+        },
+        "overrides": []
+      },
+      "targets": [{
+        "refId": "A",
+        "expr": "sum by (namespace, deployment) (increase(remediation_restarts_total[$__rate_interval]))",
+        "legendFormat": "{{namespace}}/{{deployment}}"
+      }]
+    },
+    {
+      "id": 6, "type": "bargauge", "title": "Skipped actions by reason",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "options": { "orientation": "horizontal", "displayMode": "gradient" },
+      "targets": [{
+        "refId": "A", "instant": true,
+        "expr": "sum by (reason) (remediation_skipped_total)",
+        "legendFormat": "{{reason}}"
+      }]
+    },
+    {
+      "id": 7, "type": "table", "title": "Currently firing alerts",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [{
+        "refId": "A", "instant": true, "format": "table",
+        "expr": "sum by (alertname, namespace, severity) (ALERTS{alertstate=\"firing\", alertname!=\"Watchdog\", job!~\"kube-etcd|kube-scheduler|kube-controller-manager\"})"
+      }],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true },
+            "renameByName": { "Value": "Count" }
+          }
+        }
+      ]
+    },
+    {
+      "id": 8, "type": "timeseries", "title": "Pod restarts in development (kube-state-metrics)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [{
+        "refId": "A",
+        "expr": "topk(10, sum by (namespace, pod) (increase(kube_pod_container_status_restarts_total{namespace=\"development\"}[$__rate_interval])))",
+        "legendFormat": "{{namespace}}/{{pod}}"
+      }]
+    }
+  ]
+}

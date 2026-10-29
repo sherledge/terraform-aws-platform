@@ -1,0 +1,4 @@
+flask
+kubernetes
+gunicorn
+prometheus-client

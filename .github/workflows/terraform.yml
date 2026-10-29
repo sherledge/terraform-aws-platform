@@ -1,0 +1,131 @@
+name: "Terraform Infrastructure CI/CD"
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    paths:
+      - "modules/**"
+      - "envs/**"
+  push:
+    branches: [ "main" ]
+    paths:
+      - "modules/**"
+      - "envs/**"
+
+permissions:
+  id-token: write      # Required for AWS OIDC authentication
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate-and-scan:
+    name: "Lint, Validate & Security Scan"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: "v0.50.0"
+
+      - name: Run TFLint
+        run: |
+          tflint --init
+          tflint -f compact
+
+      - name: Run Checkov Security Scan
+        uses: bridgecrewio/checkov-action@master
+        with:
+          framework: terraform
+          output_format: cli
+          soft_fail: true
+
+  plan-dev:
+    name: "Terraform Plan (Dev)"
+    needs: validate-and-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+
+      - name: Terraform Init & Plan
+        working-directory: envs/dev
+        run: |
+          terraform init
+          terraform plan -no-color -out=tfplan
+        continue-on-error: true
+
+  apply-dev:
+    name: "Apply (Dev)"
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: plan-dev
+    runs-on: ubuntu-latest
+    environment: dev
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+
+      - name: Terraform Init & Apply
+        working-directory: envs/dev
+        run: |
+          terraform init
+          terraform apply -auto-approve
+
+  apply-prod:
+    name: "Apply (Production - Gate Approval)"
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: apply-dev
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0"
+
+      - name: Terraform Init & Apply
+        working-directory: envs/prod
+        run: |
+          terraform init
+          terraform apply -auto-approve

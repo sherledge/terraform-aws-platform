@@ -1,0 +1,260 @@
+---
+# ServiceMonitor: tells Prometheus to scrape the app's /metrics endpoint.
+# The kube-prometheus-stack operator watches all namespaces for ServiceMonitors
+# that have the label release: monitoring.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: platform-app
+  namespace: development
+  labels:
+    release: monitoring       # must match the Prometheus CR's serviceMonitorSelector
+spec:
+  selector:
+    matchLabels:
+      app: platform-app       # matches dev-platform-app-svc
+  endpoints:
+    - port: http              # named port on the Service (port 80 → targetPort 8000)
+      path: /metrics
+      interval: 15s
+      honorLabels: true
+---
+# PrometheusRule: alert rules + SLO burn-rate alerts for the platform app.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: platform-app-rules
+  namespace: monitoring
+  labels:
+    release: monitoring       # must match the Prometheus CR's ruleSelector
+spec:
+  groups:
+
+    # -----------------------------------------------------------------------
+    # 1. Recording rules — pre-compute the SLI ratios used in alerts below.
+    #    Without these, every alert would re-evaluate the same expensive query.
+    # -----------------------------------------------------------------------
+    - name: platform-app.sli
+      interval: 30s
+      rules:
+        # Fraction of non-5xx requests over a 5-minute window (availability SLI).
+        - record: job:http_requests_success_rate:5m
+          expr: |
+            sum(rate(http_requests_total{namespace="development", status_code!~"5.."}[5m]))
+            /
+            sum(rate(http_requests_total{namespace="development"}[5m]))
+
+        # 99th-percentile latency over a 5-minute window (latency SLI).
+        - record: job:http_request_duration_p99:5m
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (
+                rate(http_request_duration_seconds_bucket{namespace="development"}[5m])
+              )
+            )
+
+    # -----------------------------------------------------------------------
+    # 2. Symptom alerts — these are what pages an on-call engineer.
+    #    They fire on *user-visible* signals, not internal machinery.
+    # -----------------------------------------------------------------------
+    - name: platform-app.alerts
+      rules:
+
+        # --- Availability ---------------------------------------------------
+        # Error rate > 5% for 2 consecutive minutes.
+        # The existing alert used a bare division that would return "no data"
+        # when the app had no traffic; the or vector(0) guard prevents that.
+        - alert: HighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{namespace="development", status_code=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{namespace="development"}[5m]))
+            ) > 0.05
+          for: 2m
+          labels:
+            severity: critical
+            namespace: development
+            deployment: dev-platform-app
+          annotations:
+            summary: "Error rate above 5% on dev-platform-app"
+            description: "{{ $value | humanizePercentage }} of requests are returning 5xx. Check /crash endpoint logs."
+            runbook_url: "https://github.com/sherledge/terraform-aws-platform/blob/main/docs/runbook.md#high-error-rate"
+
+        # --- Latency --------------------------------------------------------
+        # p99 latency > 1s for 3 minutes. Excludes /slow (by design slow).
+        - alert: HighLatency
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (
+                rate(http_request_duration_seconds_bucket{
+                  namespace="development",
+                  endpoint!="/slow"
+                }[5m])
+              )
+            ) > 1.0
+          for: 3m
+          labels:
+            severity: warning
+            namespace: development
+            deployment: dev-platform-app
+          annotations:
+            summary: "p99 latency above 1s on dev-platform-app"
+            description: "p99 response time is {{ $value | humanizeDuration }}. SLO target is 500ms."
+            runbook_url: "https://github.com/sherledge/terraform-aws-platform/blob/main/docs/runbook.md#high-latency"
+
+        # --- Crash-looping --------------------------------------------------
+        # More than 3 container restarts in 15 minutes on any dev-platform-app pod.
+        # Labelled so the remediation webhook can pick it up.
+        - alert: KubePodCrashLooping
+          expr: |
+            increase(
+              kube_pod_container_status_restarts_total{
+                namespace="development",
+                pod=~"dev-platform-app-.*"
+              }[15m]
+            ) > 3
+          for: 1m
+          labels:
+            severity: warning
+            namespace: development
+            deployment: dev-platform-app
+          annotations:
+            summary: "dev-platform-app pod crash-looping"
+            description: "Pod {{ $labels.pod }} has restarted {{ $value }} times in 15 min."
+            runbook_url: "https://github.com/sherledge/terraform-aws-platform/blob/main/docs/runbook.md#crash-looping"
+
+        # --- Capacity -------------------------------------------------------
+        # HPA has been at max replicas for > 5 minutes — scaling headroom exhausted.
+        - alert: HPAAtMaxReplicas
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{
+              namespace="development",
+              horizontalpodautoscaler="dev-platform-app-hpa"
+            }
+            >=
+            kube_horizontalpodautoscaler_spec_max_replicas{
+              namespace="development",
+              horizontalpodautoscaler="dev-platform-app-hpa"
+            }
+          for: 5m
+          labels:
+            severity: warning
+            namespace: development
+          annotations:
+            summary: "dev-platform-app HPA at maximum replicas"
+            description: "HPA has been at {{ $value }} replicas (max) for 5+ min. Consider raising maxReplicas."
+
+        # --- Low availability (replica count) --------------------------------
+        # Fewer available replicas than requested — distinct from crash-looping.
+        - alert: DeploymentReplicasMismatch
+          expr: |
+            kube_deployment_spec_replicas{namespace="development", deployment="dev-platform-app"}
+            !=
+            kube_deployment_status_replicas_available{namespace="development", deployment="dev-platform-app"}
+          for: 5m
+          labels:
+            severity: warning
+            namespace: development
+          annotations:
+            summary: "dev-platform-app has fewer available replicas than desired"
+            description: "Desired {{ $labels.deployment }}: spec says {{ $value }} replicas but fewer are available."
+
+    # -----------------------------------------------------------------------
+    # 3. SLO burn-rate alerts (multi-window).
+    #
+    #    SLO: 99.9% availability over a 30-day rolling window
+    #         = error budget of 0.1% = 43.2 min/month
+    #
+    #    Multi-window burn-rate lets us page fast on rapid burns
+    #    while still catching slow, sustained burns before they exhaust
+    #    the budget. Based on the Google SRE workbook approach.
+    #
+    #    Burn rate 14.4× → exhausts 30-day budget in ~50 h  (page now)
+    #    Burn rate  6.0× → exhausts 30-day budget in ~5 days (page now)
+    #    Burn rate  1.0× → on track to exactly hit budget     (ticket)
+    # -----------------------------------------------------------------------
+    - name: platform-app.slo
+      rules:
+
+        # Fast burn: 14.4× over both 1h and 5m windows → page immediately.
+        - alert: SLOErrorBudgetFastBurn
+          expr: |
+            (
+              (1 - job:http_requests_success_rate:5m) > (14.4 * 0.001)
+            )
+            and
+            (
+              (
+                1 - sum(rate(http_requests_total{namespace="development", status_code!~"5.."}[1h]))
+                    /
+                    sum(rate(http_requests_total{namespace="development"}[1h]))
+              ) > (14.4 * 0.001)
+            )
+          for: 2m
+          labels:
+            severity: critical
+            slo: availability
+            namespace: development
+          annotations:
+            summary: "SLO fast burn — error budget exhausting rapidly"
+            description: |
+              Error rate is burning the 30-day availability budget at >14.4×.
+              At this rate the full budget is gone in ~50 hours.
+              Current error rate: {{ $value | humanizePercentage }}.
+
+        # Slow burn: 6× over both 6h and 30m windows → page before budget is gone.
+        - alert: SLOErrorBudgetSlowBurn
+          expr: |
+            (
+              (
+                1 - sum(rate(http_requests_total{namespace="development", status_code!~"5.."}[30m]))
+                    /
+                    sum(rate(http_requests_total{namespace="development"}[30m]))
+              ) > (6 * 0.001)
+            )
+            and
+            (
+              (
+                1 - sum(rate(http_requests_total{namespace="development", status_code!~"5.."}[6h]))
+                    /
+                    sum(rate(http_requests_total{namespace="development"}[6h]))
+              ) > (6 * 0.001)
+            )
+          for: 15m
+          labels:
+            severity: warning
+            slo: availability
+            namespace: development
+          annotations:
+            summary: "SLO slow burn — error budget draining"
+            description: |
+              Error rate has been burning the 30-day budget at >6× for 15+ minutes.
+              At this rate the budget is gone in ~5 days.
+              Current error rate: {{ $value | humanizePercentage }}.
+
+        # Latency SLO: 99% of requests < 500ms (30-day).
+        # A single window is enough here — latency spikes are obvious.
+        - alert: SLOLatencyBudgetBurn
+          expr: |
+            histogram_quantile(
+              0.99,
+              sum by (le) (
+                rate(http_request_duration_seconds_bucket{
+                  namespace="development",
+                  endpoint!="/slow"
+                }[5m])
+              )
+            ) > 0.5
+          for: 5m
+          labels:
+            severity: warning
+            slo: latency
+            namespace: development
+          annotations:
+            summary: "SLO latency budget burning — p99 above 500ms"
+            description: |
+              p99 latency is {{ $value | humanizeDuration }}, above the 500ms SLO target.
+              Sustained for 5+ minutes.

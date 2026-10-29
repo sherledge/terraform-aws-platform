@@ -1,0 +1,17 @@
+groups:
+- name: platform-alerts
+  rules:
+  - alert: HighErrorRate
+    expr: sum(rate(http_requests_total{status_code=~"5.."}[5m])) / sum(rate(http_requests_total[5m])) > 0.05
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "High error rate detected (> 5%)"
+  - alert: PodCrashLooping
+    expr: rate(kube_pod_container_status_restarts_total[5m]) > 0.1
+    for: 1m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Pod is crash looping"

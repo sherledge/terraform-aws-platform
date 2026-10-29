@@ -1,0 +1,118 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: remediation-sa
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: remediation-role
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: remediation-cluster-binding
+subjects:
+  - kind: ServiceAccount
+    name: remediation-sa
+    namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: remediation-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remediation-service
+  namespace: monitoring
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: remediation-service
+  template:
+    metadata:
+      labels:
+        app: remediation-service
+    spec:
+      serviceAccountName: remediation-sa
+      containers:
+        - name: remediation
+          image: remediation:v7
+          imagePullPolicy: Never
+          command: ["python", "webhook_handler.py"]
+          env:
+            - name: ALLOWED_NAMESPACES
+              value: "development"
+            - name: COOLDOWN_SECONDS
+              value: "300"
+            - name: RESTART_LIMIT
+              value: "2"
+            - name: MAX_ACTIONS_PER_HOUR
+              value: "6"
+            - name: SLACK_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: remediation-slack
+                  key: url
+                  optional: true
+          ports:
+            - containerPort: 5000
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 5000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: remediation-service
+  namespace: monitoring
+  labels:
+    app: remediation-service
+spec:
+  selector:
+    app: remediation-service
+  ports:
+    - name: http
+      protocol: TCP
+      port: 5000
+      targetPort: 5000
+  type: ClusterIP
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: remediation-service
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: remediation-service
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+      honorLabels: true

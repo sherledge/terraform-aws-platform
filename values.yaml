@@ -1,0 +1,24 @@
+kubeEtcd:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+
+alertmanager:
+  config:
+    route:
+      group_by: ['namespace', 'alertname']
+      group_wait: 0s
+      group_interval: 10s
+      repeat_interval: 1h
+      receiver: 'auto-remediation-webhook'
+      routes:
+      - receiver: auto-remediation-webhook
+        match:
+          alertname: PodCrashLooping
+    receivers:
+    - name: 'auto-remediation-webhook'
+      webhook_configs:
+      - url: 'http://remediation-service:5000/webhook'
+        send_resolved: false
