@@ -119,11 +119,3 @@ Full report: [`chaos/MTTR_REPORT.md`](chaos/MTTR_REPORT.md)
    - *Limitation:* It cannot roll back database schema migrations, external API outages, or misconfigured ConfigMaps/Secrets. When rollbacks fail to restore health, the service hits the **Escalate** rung to pull in humans.
 3. **Multi-Cluster / GitOps Drift:**
    - When the remediation service patches a deployment directly via Kubernetes API, it introduces drift against the GitOps repository. ArgoCD auto-sync must have automated self-healing coordination or commit the rollback back to Git.
-
----
-
-## Key Interview Talking Points
-
-- **"Restarts can't fix bad code, so the system escalates."** Transient memory leaks or deadlocks may be solved by a restart; broken binaries or invalid configs never will. The system allows 2 restarts, then executes a rollback, and finally escalates to a human.
-- **"Rollbacks must be template-aware, not revision-aware."** Restarts generate new revisions that differ only by timestamps. Naive rollbacks fail by rolling back to the same broken image; our template sanitizer diffs actual spec definitions.
-- **"Symptom alerts over cause alerts."** We alert on user-visible symptoms (error rate, p99 latency, SLO burn rate) rather than internal machinery, keeping on-call noise low and actionable.
